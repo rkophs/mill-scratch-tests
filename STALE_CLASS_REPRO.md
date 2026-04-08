@@ -9,8 +9,7 @@ Two modules exist:
 
 - **`mill-generated-code-test`** — Uses `org.immutables:value` annotation processing.
   `TestImmutableAlpha` depends on the *generated* `ImmutableTestImmutableBeta` class.
-  `TestImmutableGamma` is an independent immutable (used as a third source to keep
-  `zincIncrementalCompilation` enabled after deletion).
+  `TestImmutableGamma` is an independent immutable.
 - **`mill-non-generated-code-test`** — Plain Java POJOs.
   `Gamma` depends on `Delta`. `Epsilon` is an independent class.
 
@@ -20,157 +19,23 @@ Mill version: 1.1.5
 
 | # | Bug | Scenario | Root Cause |
 |---|-----|----------|------------|
-| 1 | Stale `.class` files when source count drops from 2 → 1 | 2-source modules | `zincIncrementalCompilation` flips to `false` when `allSourceFiles().length <= 1`, causing Zinc to lose its analysis |
-| 2 | Annotation-processor-generated `.class` files are never cleaned up | Any module with annotation processing | Zinc cannot track generated classes back to their source (logs: `Could not determine source for class ...`) |
+| 1 | Annotation-processor-generated `.class` files are never cleaned up | Any module with annotation processing (3-source scenario) | Zinc cannot track generated classes back to their source (logs: `Could not determine source for class ...`) |
+| 2 | Stale `.class` files when source count drops from 2 → 1 | 2-source modules | `zincIncrementalCompilation` flips to `false` when `allSourceFiles().length <= 1`, causing Zinc to lose its analysis |
 | 3 | `mill clean` (no args) does not clean module compile targets | All modules | Bare `mill clean` doesn't target module-level tasks; `mill clean __.compile` is required |
 
 ---
 
-## Bug 1: Two-Source Scenario (both generated and non-generated affected)
+## Bug 1: Annotation-Processor-Generated Classes Are Never Cleaned (3-Source Scenario)
 
-When a module has only 2 source files and one is deleted, `zincIncrementalCompilation`
-evaluates to `allSourceFiles().length > 1` → `1 > 1` → `false`. Zinc receives an empty
-`PreviousResult` and has no idea which old `.class` files exist.
+With 3 source files per module, `zincIncrementalCompilation` stays enabled after deleting
+one file (`allSourceFiles().length > 1` remains `true`). Zinc correctly handles plain Java
+source deletion but **not** annotation-processor-generated classes.
 
-### 1.1. Clean build with 2 sources per module
+### 1.1. Clean build with 3 sources per module
 
-```
-$ rm -rf out/
-$ mill __.compile
-85] compiling 2 Java sources to out/mill-non-generated-code-test/compile.dest/classes ...
-86] compiling 2 Java sources to out/mill-generated-code-test/compile.dest/classes ...
-86/86, SUCCESS] mill __.compile
-```
-
-### 1.2. Verify compiled classes
-
-```
-$ ls out/mill-generated-code-test/compile.dest/classes/com/rkophs/mill/test/
-ImmutableTestImmutableAlpha$Builder.class
-ImmutableTestImmutableAlpha.class
-ImmutableTestImmutableBeta$Builder.class
-ImmutableTestImmutableBeta.class
-TestImmutableAlpha.class
-TestImmutableBeta.class
-
-$ ls out/mill-non-generated-code-test/compile.dest/classes/com/rkophs/mill/test/
-Delta.class
-Gamma.class
-```
-
-### 1.3. Delete source files that other classes depend on
-
-```
-$ rm mill-generated-code-test/src/com/rkophs/mill/test/TestImmutableBeta.java
-$ rm mill-non-generated-code-test/src/com/rkophs/mill/test/Delta.java
-```
-
-### 1.4. Incremental compile succeeds (BUG)
-
-```
-$ mill __.compile
-85] compiling 1 Java source to out/mill-non-generated-code-test/compile.dest/classes ...
-86] compiling 1 Java source to out/mill-generated-code-test/compile.dest/classes ...
-86/86, SUCCESS] mill __.compile
-```
-
-**Expected:** Compilation should fail — `Gamma` depends on `Delta` and `TestImmutableAlpha`
-depends on `ImmutableTestImmutableBeta`, both of which no longer have source files.
-
-**Actual:** Compilation succeeds because stale `.class` files for `Delta` and
-`ImmutableTestImmutableBeta` remain in the output directory:
-
-```
-$ ls out/mill-generated-code-test/compile.dest/classes/com/rkophs/mill/test/
-ImmutableTestImmutableAlpha$Builder.class
-ImmutableTestImmutableAlpha.class
-ImmutableTestImmutableBeta$Builder.class   <-- STALE
-ImmutableTestImmutableBeta.class           <-- STALE
-TestImmutableAlpha.class
-TestImmutableBeta.class                    <-- STALE
-
-$ ls out/mill-non-generated-code-test/compile.dest/classes/com/rkophs/mill/test/
-Delta.class    <-- STALE
-Gamma.class
-```
-
-### 1.5. Assembly jars include stale classes
-
-```
-$ mill __.assembly
-138/138, SUCCESS] mill __.assembly
-
-$ jar tf out/mill-generated-code-test/assembly.dest/out.jar | grep com/rkophs
-com/rkophs/mill/test/TestImmutableBeta.class              <-- STALE
-com/rkophs/mill/test/ImmutableTestImmutableAlpha$Builder.class
-com/rkophs/mill/test/ImmutableTestImmutableBeta.class     <-- STALE
-com/rkophs/mill/test/ImmutableTestImmutableAlpha.class
-com/rkophs/mill/test/TestImmutableAlpha.class
-com/rkophs/mill/test/ImmutableTestImmutableBeta$Builder.class  <-- STALE
-
-$ jar tf out/mill-non-generated-code-test/assembly.dest/out.jar | grep com/rkophs
-com/rkophs/mill/test/Gamma.class
-com/rkophs/mill/test/Delta.class    <-- STALE
-```
-
-### 1.6. Only `rm -rf out/` proves the code is actually broken
-
-```
-$ rm -rf out/
-$ mill __.compile
-85] [error] mill-non-generated-code-test/src/com/rkophs/mill/test/Gamma.java:5:19
-85]     private final Delta delta;
-85]                   ^^^^^
-85] cannot find symbol
-
-86] [error] mill-generated-code-test/src/com/rkophs/mill/test/TestImmutableAlpha.java:8:5
-86]     ImmutableTestImmutableBeta getBeta();
-86]     ^^^^^^^^^^^^^^^^^^^^^^^^^^
-86] cannot find symbol
-
-86/86, 2 FAILED] mill __.compile
-```
-
----
-
-## Bug 2: Three-Source Scenario (only annotation-processor-generated code affected)
-
-Adding a third source file to each module keeps `zincIncrementalCompilation` enabled
-(`allSourceFiles().length > 1` remains `true` after deletion). This fixes the non-generated
-case but **not** the annotation-processor case.
-
-### 2.0. Add a third source file to each module
-
-**mill-generated-code-test/src/com/rkophs/mill/test/TestImmutableGamma.java:**
-```java
-package com.rkophs.mill.test;
-
-import org.immutables.value.Value;
-
-@Value.Immutable
-public interface TestImmutableGamma {
-    long getSomeLong();
-}
-```
-
-**mill-non-generated-code-test/src/com/rkophs/mill/test/Epsilon.java:**
-```java
-package com.rkophs.mill.test;
-
-public class Epsilon {
-    private final long someLong;
-
-    public Epsilon(long someLong) {
-        this.someLong = someLong;
-    }
-
-    public long getSomeLong() {
-        return someLong;
-    }
-}
-```
-
-### 2.1. Clean build with 3 sources per module
+Ensure all source files are present:
+- `mill-generated-code-test/src/.../TestImmutableAlpha.java`, `TestImmutableBeta.java`, `TestImmutableGamma.java`
+- `mill-non-generated-code-test/src/.../Gamma.java`, `Delta.java`, `Epsilon.java`
 
 ```
 $ rm -rf out/
@@ -180,7 +45,7 @@ $ mill __.compile
 86/86, SUCCESS] mill __.compile
 ```
 
-### 2.2. Verify compiled classes
+### 1.2. Verify compiled classes
 
 ```
 $ ls out/mill-generated-code-test/compile.dest/classes/com/rkophs/mill/test/
@@ -200,14 +65,14 @@ Epsilon.class
 Gamma.class
 ```
 
-### 2.3. Delete source files that other classes depend on
+### 1.3. Delete source files that other classes depend on
 
 ```
 $ rm mill-generated-code-test/src/com/rkophs/mill/test/TestImmutableBeta.java
 $ rm mill-non-generated-code-test/src/com/rkophs/mill/test/Delta.java
 ```
 
-### 2.4. Incremental compile — non-generated CORRECTLY fails, generated INCORRECTLY succeeds
+### 1.4. Incremental compile — non-generated CORRECTLY fails, generated INCORRECTLY succeeds
 
 ```
 $ mill __.compile
@@ -250,11 +115,146 @@ processor-generated classes back to their source files. During compilation, Zinc
 Because `TestImmutableAlpha` references `ImmutableTestImmutableBeta`, and that stale generated
 class is still on the classpath, compilation silently succeeds when it should fail.
 
+### 1.5. Only `rm -rf out/` proves the generated code is also broken
+
+```
+$ rm -rf out/
+$ mill __.compile
+86] [error] mill-generated-code-test/src/com/rkophs/mill/test/TestImmutableAlpha.java:8:5
+86]     ImmutableTestImmutableBeta getBeta();
+86]     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+86] cannot find symbol
+
+86/86, 2 FAILED] mill __.compile
+```
+
+---
+
+## Bug 2: Stale Classes When Source Count Drops From 2 → 1 (both generated and non-generated affected)
+
+When a module has only 2 source files and one is deleted, `zincIncrementalCompilation`
+evaluates to `allSourceFiles().length > 1` → `1 > 1` → `false`. Zinc receives an empty
+`PreviousResult` and has no idea which old `.class` files exist. **Both** generated and
+non-generated modules are affected.
+
+### 2.0. Setup: Remove the third source files
+
+Starting from a clean repo, remove the third source files so each module has exactly 2:
+
+```
+$ rm mill-generated-code-test/src/com/rkophs/mill/test/TestImmutableGamma.java
+$ rm mill-non-generated-code-test/src/com/rkophs/mill/test/Epsilon.java
+```
+
+### 2.1. Clean build with 2 sources per module
+
+```
+$ rm -rf out/
+$ mill __.compile
+85] compiling 2 Java sources to out/mill-non-generated-code-test/compile.dest/classes ...
+86] compiling 2 Java sources to out/mill-generated-code-test/compile.dest/classes ...
+86/86, SUCCESS] mill __.compile
+```
+
+### 2.2. Verify compiled classes
+
+```
+$ ls out/mill-generated-code-test/compile.dest/classes/com/rkophs/mill/test/
+ImmutableTestImmutableAlpha$Builder.class
+ImmutableTestImmutableAlpha.class
+ImmutableTestImmutableBeta$Builder.class
+ImmutableTestImmutableBeta.class
+TestImmutableAlpha.class
+TestImmutableBeta.class
+
+$ ls out/mill-non-generated-code-test/compile.dest/classes/com/rkophs/mill/test/
+Delta.class
+Gamma.class
+```
+
+### 2.3. Delete source files that other classes depend on
+
+```
+$ rm mill-generated-code-test/src/com/rkophs/mill/test/TestImmutableBeta.java
+$ rm mill-non-generated-code-test/src/com/rkophs/mill/test/Delta.java
+```
+
+### 2.4. Incremental compile succeeds (BUG)
+
+```
+$ mill __.compile
+85] compiling 1 Java source to out/mill-non-generated-code-test/compile.dest/classes ...
+86] compiling 1 Java source to out/mill-generated-code-test/compile.dest/classes ...
+86/86, SUCCESS] mill __.compile
+```
+
+**Expected:** Compilation should fail — `Gamma` depends on `Delta` and `TestImmutableAlpha`
+depends on `ImmutableTestImmutableBeta`, both of which no longer have source files.
+
+**Actual:** Compilation succeeds because stale `.class` files for `Delta` and
+`ImmutableTestImmutableBeta` remain in the output directory:
+
+```
+$ ls out/mill-generated-code-test/compile.dest/classes/com/rkophs/mill/test/
+ImmutableTestImmutableAlpha$Builder.class
+ImmutableTestImmutableAlpha.class
+ImmutableTestImmutableBeta$Builder.class   <-- STALE
+ImmutableTestImmutableBeta.class           <-- STALE
+TestImmutableAlpha.class
+TestImmutableBeta.class                    <-- STALE
+
+$ ls out/mill-non-generated-code-test/compile.dest/classes/com/rkophs/mill/test/
+Delta.class    <-- STALE
+Gamma.class
+```
+
+### 2.5. Assembly jars include stale classes
+
+```
+$ mill __.assembly
+138/138, SUCCESS] mill __.assembly
+
+$ jar tf out/mill-generated-code-test/assembly.dest/out.jar | grep com/rkophs
+com/rkophs/mill/test/TestImmutableBeta.class              <-- STALE
+com/rkophs/mill/test/ImmutableTestImmutableAlpha$Builder.class
+com/rkophs/mill/test/ImmutableTestImmutableBeta.class     <-- STALE
+com/rkophs/mill/test/ImmutableTestImmutableAlpha.class
+com/rkophs/mill/test/TestImmutableAlpha.class
+com/rkophs/mill/test/ImmutableTestImmutableBeta$Builder.class  <-- STALE
+
+$ jar tf out/mill-non-generated-code-test/assembly.dest/out.jar | grep com/rkophs
+com/rkophs/mill/test/Gamma.class
+com/rkophs/mill/test/Delta.class    <-- STALE
+```
+
+### 2.6. Only `rm -rf out/` proves the code is actually broken
+
+```
+$ rm -rf out/
+$ mill __.compile
+85] [error] mill-non-generated-code-test/src/com/rkophs/mill/test/Gamma.java:5:19
+85]     private final Delta delta;
+85]                   ^^^^^
+85] cannot find symbol
+
+86] [error] mill-generated-code-test/src/com/rkophs/mill/test/TestImmutableAlpha.java:8:5
+86]     ImmutableTestImmutableBeta getBeta();
+86]     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+86] cannot find symbol
+
+86/86, 2 FAILED] mill __.compile
+```
+
 ---
 
 ## Bug 3: `mill clean` (no args) does not clean module compile targets
 
-### 3.1. Starting from the Bug 1 state (stale classes present after 2-source deletion)
+### 3.0. Setup: Reproduce the Bug 2 stale state
+
+Repeat steps 2.0 through 2.4 to get into a state where stale `.class` files exist after
+a 2-source deletion.
+
+### 3.1. `mill clean` (no args) does not help
 
 ```
 $ mill clean
@@ -298,23 +298,23 @@ compile properly fails.
 
 | Scenario | Non-generated code | Annotation-processor-generated code |
 |----------|-------------------|-------------------------------------|
-| 2 sources → delete 1 (drops to 1 source) | BUG: Stale classes survive | BUG: Stale classes survive |
 | 3+ sources → delete 1 (stays > 1 source) | OK: Zinc properly cleans up | BUG: Generated classes never cleaned |
+| 2 sources → delete 1 (drops to 1 source) | BUG: Stale classes survive | BUG: Stale classes survive |
 | `mill clean` (no args) | Does NOT clean | Does NOT clean |
 | `mill clean __.compile` | Cleans properly | Cleans properly |
 | `rm -rf out/` | Cleans properly | Cleans properly |
 
 ### Root Causes
 
-1. **`zincIncrementalCompilation` threshold** — Defined as `allSourceFiles().length > 1`,
-   this flips to `false` when only 1 source remains, causing Zinc to discard its prior
-   analysis and lose all source→class tracking. This affects all code (generated and
-   non-generated).
-
-2. **Zinc cannot track annotation-processor outputs** — Zinc's incremental analysis maps
+1. **Zinc cannot track annotation-processor outputs** — Zinc's incremental analysis maps
    source files to the `.class` files they produce. Annotation-processor-generated classes
    are not recorded in this mapping (evidenced by `Could not determine source` warnings),
    so Zinc never knows to remove them when the originating source is deleted.
+
+2. **`zincIncrementalCompilation` threshold** — Defined as `allSourceFiles().length > 1`,
+   this flips to `false` when only 1 source remains, causing Zinc to discard its prior
+   analysis and lose all source→class tracking. This affects all code (generated and
+   non-generated).
 
 3. **`mill clean` scope** — Bare `mill clean` does not target module-level persistent tasks
    like `compile`. Users must use `mill clean __.compile` to wipe compile outputs.
