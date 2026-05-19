@@ -14,7 +14,7 @@ object `package` extends ScalaModule with PublishModule {
     developers = Seq(Developer("rkophs", "Ryan Kophs", "https://github.com/rkophs"))
   )
   def mvnDeps = Seq(
-    mvn"com.lihaoyi:mill-libs-javalib_3:1.1.5-25-21a88e",
-    mvn"com.lihaoyi:mill-core-api_3:1.1.5-25-21a88e"
+    mvn"com.lihaoyi:mill-libs-javalib_3:1.1.6-29-55543e",
+    mvn"com.lihaoyi:mill-core-api_3:1.1.6-29-55543e"
   )
 }

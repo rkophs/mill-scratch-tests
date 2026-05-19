@@ -1,3 +1,5 @@
+extends: com.rkophs.mill.SimpleJavaModule
+mill-experimental-precompiled-module: true
 mill-build:
   mvnDeps:
     - com.rkophs:custom-module_3:0.1.0
